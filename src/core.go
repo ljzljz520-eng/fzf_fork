@@ -252,7 +252,7 @@ func Run(opts *Options) (int, error) {
 		denylistCopy := maps.Clone(denylist)
 		denyMutex.Unlock()
 		return BuildPattern(cache, patternCache,
-			opts.Fuzzy, opts.FuzzyAlgo, opts.Extended, opts.Case, opts.Normalize, forward, withPos,
+			opts.Fuzzy, opts.FuzzyAlgo, opts.Extended, opts.Regex, opts.Case, opts.Normalize, forward, withPos,
 			opts.Filter == nil, nth, opts.Delimiter, inputRevision, runes, denylistCopy, headerLines)
 	}
 	matcher := NewMatcher(cache, patternBuilder, sort, opts.Tac, eventBox, inputRevision, opts.Threads)

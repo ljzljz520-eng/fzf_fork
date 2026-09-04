@@ -49,6 +49,11 @@ Extended-search mode. Enabled by default. You can disable it with \fB+x\fR or
 .B "\-e, \-\-exact"
 Enable exact-match
 .TP
+.B "\-\-regex"
+Treat each search term as a regular expression using Go's RE2 syntax.
+See the REGULAR EXPRESSION MODE section below. You can disable it with
+\fB\-\-no\-regex\fR.
+.TP
 .B "\-i, \-\-ignore\-case"
 Case-insensitive match (default: smart-case match)
 .TP
@@ -1611,6 +1616,42 @@ query matches entries that start with \fBcore\fR and end with either \fBgo\fR,
 \fBrb\fR, or \fBpy\fR.
 
 e.g. \fB^core go$ | rb$ | py$\fR
+
+.SH REGULAR EXPRESSION MODE
+Start fzf with \fB\-\-regex\fR to interpret each search term as a regular
+expression. The expressions use Go's RE2 syntax (a subset of PCRE with linear
+time matching; lookahead/lookbehind assertions and backreferences are not
+supported).
+
+The extended-search combinators still apply: spaces delimit AND terms, a
+standalone \fB|\fR term (with spaces around it) acts as the OR operator, a
+leading \fB!\fR negates the term, and \fB\\ \fR matches a literal space.
+A vertical bar inside a term is regular-expression alternation instead, so
+\fBfoo|bar\fR is one term matching either string while \fBfoo | bar\fR is the
+OR operator.
+
+e.g.
+     \fBfzf \-\-regex \-\-filter '^core.*\\.(go|rb|py)$'\fR
+.br
+     \fBseq 100 | fzf \-\-regex \-f '^(1|5)\\d$'\fR
+.br
+     \fBps \-ef | fzf \-\-regex \-f 'python !grep'\fR
+
+In this mode, \fB'\fR, \fB^\fR, and \fB$\fR are not treated as fzf term
+markers: \fB^\fR and \fB$\fR keep their usual regular-expression meanings and
+anchor the match to the start or the end of the line, and \fB'\fR is a literal
+character. A leading \fB!\fR still negates the term, so a line that starts with
+a literal exclamation mark should be written as \fB[!]...\fR.
+
+Case sensitivity follows the same smart\-case rule used in the other modes:
+a term containing uppercase letters is matched case-sensitively, otherwise
+case-insensitively (see \fB\-i\fR, \fB+i\fR, and \fB\-\-smart\-case\fR).
+Latin letter normalization (unless \fB\-\-literal\fR is given) is applied as
+well.
+
+An expression that is not a valid regular expression (for example, an unclosed
+bracket while you are still typing) matches no line until it becomes valid;
+fzf does not print an error.
 
 .SH KEY/EVENT BINDINGS
 \fB\-\-bind\fR option allows you to bind \fBa key\fR or \fBan event\fR to one or

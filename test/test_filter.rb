@@ -21,6 +21,35 @@ class TestFilter < TestBase
                  `seq 10 | #{FZF} -f '1 | !1'`.lines(chomp: true)
   end
 
+  def test_regex
+    # Basic regular-expression matching
+    assert_equal %w[foobar],
+                 `printf 'foo\nfoobar\nbar\n' | #{FZF} --regex -f 'foo.*bar'`.lines(chomp: true)
+    # ^ and $ are regular-expression anchors
+    assert_equal %w[bar],
+                 `printf 'bar\nbarbaz\nfoobar\n' | #{FZF} --regex -f '^bar$'`.lines(chomp: true)
+    # In-term alternation and the spaced OR operator both work
+    assert_equal %w[foo bar],
+                 `printf 'foo\nbar\nbaz\n' | #{FZF} --regex -f 'foo|bar'`.lines(chomp: true)
+    assert_equal %w[foo bar],
+                 `printf 'foo\nbar\nbaz\n' | #{FZF} --regex -f 'foo | bar'`.lines(chomp: true)
+    # Negation
+    assert_equal %w[foo baz],
+                 `printf 'foo\nbar\nbaz\n' | #{FZF} --regex -f '!bar'`.lines(chomp: true)
+    # Smart-case: uppercase term is case-sensitive, lowercase is not
+    assert_empty `printf 'foobar\n' | #{FZF} --regex -f 'FOO'`
+    assert_equal %w[FOOBAR],
+                 `printf 'FOOBAR\n' | #{FZF} --regex -f 'foo'`.lines(chomp: true)
+    # Character classes and quantifiers
+    assert_equal %w[a1 a2],
+                 `printf 'a1\na2\nb1\n' | #{FZF} --regex -f 'a[0-9]'`.lines(chomp: true)
+    # An invalid regular expression matches nothing without crashing
+    assert_empty `printf 'foo\n' | #{FZF} --regex -f '['`
+    # Non-extended mode: the entire query is one regular expression
+    assert_equal ['foo bar'],
+                 `printf 'foo bar\nfoobar\n' | #{FZF} --regex +x -f 'foo bar'`.lines(chomp: true)
+  end
+
   def test_smart_case_for_each_term
     assert_equal 1, `echo Foo bar | #{FZF} -x -f "foo Fbar" | wc -l`.to_i
   end

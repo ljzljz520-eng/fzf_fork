@@ -16,7 +16,7 @@ func init() {
 }
 
 func TestParseTermsExtended(t *testing.T) {
-	terms := parseTerms(true, CaseSmart, false,
+	terms := parseTerms(true, false, CaseSmart, false,
 		"aaa 'bbb ^ccc ddd$ !eee !'fff !^ggg !hhh$ | ^iii$ ^xxx | 'yyy | zzz$ | !ZZZ |")
 	if len(terms) != 9 ||
 		terms[0][0].typ != termFuzzy || terms[0][0].inv ||
@@ -43,7 +43,7 @@ func TestParseTermsExtended(t *testing.T) {
 }
 
 func TestParseTermsExtendedExact(t *testing.T) {
-	terms := parseTerms(false, CaseSmart, false,
+	terms := parseTerms(false, false, CaseSmart, false,
 		"aaa 'bbb ^ccc ddd$ !eee !'fff !^ggg !hhh$")
 	if len(terms) != 8 ||
 		terms[0][0].typ != termExact || terms[0][0].inv || len(terms[0][0].text) != 3 ||
@@ -59,21 +59,142 @@ func TestParseTermsExtendedExact(t *testing.T) {
 }
 
 func TestParseTermsEmpty(t *testing.T) {
-	terms := parseTerms(true, CaseSmart, false, "' ^ !' !^")
+	terms := parseTerms(true, false, CaseSmart, false, "' ^ !' !^")
 	if len(terms) != 0 {
 		t.Errorf("%v", terms)
 	}
 }
 
-func buildPattern(fuzzy bool, fuzzyAlgo algo.Algo, extended bool, caseMode Case, normalize bool, forward bool,
+func TestParseTermsRegex(t *testing.T) {
+	terms := parseTerms(true, true, CaseSmart, false, `^abc def$ 'ghi !jkl | FOO bar\ baz`)
+	// !jkl and FOO form one OR term set
+	if len(terms) != 5 {
+		t.Fatalf("5 term sets expected: %v", terms)
+	}
+	// ^, $, and ' are not interpreted as fzf term markers in regex mode
+	if terms[0][0].typ != termRegex || terms[0][0].inv || string(terms[0][0].text) != "^abc" {
+		t.Errorf("anchored regex term: %v", terms[0][0])
+	}
+	if terms[1][0].typ != termRegex || terms[1][0].inv || string(terms[1][0].text) != "def$" {
+		t.Errorf("suffix regex term: %v", terms[1][0])
+	}
+	if terms[2][0].typ != termRegex || terms[2][0].inv || string(terms[2][0].text) != "'ghi" {
+		t.Errorf("quoted regex term: %v", terms[2][0])
+	}
+	// ! still negates, and the rest is treated as a regular expression
+	if terms[3][0].typ != termRegex || !terms[3][0].inv || string(terms[3][0].text) != "jkl" {
+		t.Errorf("inverse regex term: %v", terms[3][0])
+	}
+	// A standalone | is still the OR operator; the uppercase term is kept
+	// verbatim and smart-case marks it case-sensitive
+	if terms[3][1].typ != termRegex || terms[3][1].inv || !terms[3][1].caseSensitive ||
+		string(terms[3][1].text) != "FOO" {
+		t.Errorf("OR regex term: %v", terms[3][1])
+	}
+	// Escaped space is a literal space inside the regular expression
+	if terms[4][0].typ != termRegex || terms[4][0].inv || string(terms[4][0].text) != "bar baz" {
+		t.Errorf("escaped-space regex term: %v", terms[4][0])
+	}
+}
+
+func regexPattern(caseMode Case, normalize bool, extended bool, query string) *Pattern {
+	return buildPattern(true, algo.FuzzyMatchV2, extended, true, caseMode, normalize, true, false, true,
+		[]Range{}, Delimiter{}, []rune(query))
+}
+
+func TestRegexMatch(t *testing.T) {
+	matches := func(pat *Pattern, str string) bool {
+		item := Item{text: util.ToChars([]byte(str))}
+		match, _, _ := pat.MatchItem(&item, false, slab)
+		return match.item != nil
+	}
+
+	// Basic regular-expression matching
+	pat := regexPattern(CaseSmart, false, true, `foo.*bar`)
+	if !matches(pat, "foobar") || !matches(pat, "foo---bar") || matches(pat, "foo") || matches(pat, "bar") {
+		t.Error("foo.*bar")
+	}
+
+	// ^ and $ are regular-expression anchors
+	pat = regexPattern(CaseSmart, false, true, `^bar$`)
+	if !matches(pat, "bar") || matches(pat, "barbaz") || matches(pat, "foobar") {
+		t.Error("^bar$")
+	}
+
+	// In-term alternation and the fzf OR operator both work
+	pat = regexPattern(CaseSmart, false, true, `foo|bar`)
+	if !matches(pat, "foo") || !matches(pat, "bar") || matches(pat, "baz") {
+		t.Error("foo|bar alternation")
+	}
+	pat = regexPattern(CaseSmart, false, true, `foo | bar`)
+	if !matches(pat, "foo") || !matches(pat, "bar") || matches(pat, "baz") {
+		t.Error("foo | bar OR")
+	}
+
+	// Negation
+	pat = regexPattern(CaseSmart, false, true, `!bar`)
+	if matches(pat, "bar") || !matches(pat, "foo") {
+		t.Error("!bar negation")
+	}
+
+	// Smart-case: an uppercase term is case-sensitive, a lowercase one is not
+	pat = regexPattern(CaseSmart, false, true, `FOO`)
+	if matches(pat, "foobar") || !matches(pat, "FOOBAR") {
+		t.Error("smart-case sensitive term")
+	}
+	pat = regexPattern(CaseSmart, false, true, `foo`)
+	if !matches(pat, "FOOBAR") {
+		t.Error("smart-case insensitive term")
+	}
+	pat = regexPattern(CaseIgnore, false, true, `[A-Z]+`)
+	if !matches(pat, "abc") {
+		t.Error("ignore-case character class")
+	}
+
+	// Case-insensitive compilation must not lowercase the expression:
+	// \D (non-digit) must not turn into \d (digit)
+	chars := util.ToChars([]byte("abc"))
+	res, _ := algo.RegexMatch(false, false, true, &chars, []rune(`\D`), false, nil)
+	if res.Start < 0 {
+		t.Error(`\D should match a non-digit under case-insensitive mode`)
+	}
+
+	// An invalid regular expression never matches
+	pat = regexPattern(CaseSmart, false, true, `[`)
+	if matches(pat, "anything") {
+		t.Error("invalid regex should not match")
+	}
+
+	// Non-extended mode: the entire query is one regular expression
+	pat = regexPattern(CaseSmart, false, false, `foo bar`)
+	if !matches(pat, "foo bar") || matches(pat, "foobar") {
+		t.Error("non-extended regex")
+	}
+
+	// Normalization: latin accented letters are folded
+	pat = regexPattern(CaseSmart, true, true, `cafe`)
+	if !matches(pat, "café") {
+		t.Error("normalized regex match")
+	}
+
+	// Offsets are reported in rune indices for multi-byte items
+	pat = regexPattern(CaseSmart, false, true, `foo.bar`)
+	item := Item{text: util.ToChars([]byte("café foo-bar"))}
+	match, offsets, _ := pat.MatchItem(&item, true, slab)
+	if match.item == nil || offsets[0][0] != 5 || offsets[0][1] != 12 {
+		t.Errorf("rune-space offsets: %v %v", match.item, offsets)
+	}
+}
+
+func buildPattern(fuzzy bool, fuzzyAlgo algo.Algo, extended bool, regex bool, caseMode Case, normalize bool, forward bool,
 	withPos bool, cacheable bool, nth []Range, delimiter Delimiter, runes []rune) *Pattern {
 	return BuildPattern(NewChunkCache(), make(map[string]*Pattern),
-		fuzzy, fuzzyAlgo, extended, caseMode, normalize, forward,
+		fuzzy, fuzzyAlgo, extended, regex, caseMode, normalize, forward,
 		withPos, cacheable, nth, delimiter, revision{}, runes, nil, 0)
 }
 
 func TestExact(t *testing.T) {
-	pattern := buildPattern(true, algo.FuzzyMatchV2, true, CaseSmart, false, true, false, true,
+	pattern := buildPattern(true, algo.FuzzyMatchV2, true, false, CaseSmart, false, true, false, true,
 		[]Range{}, Delimiter{}, []rune("'abc"))
 	chars := util.ToChars([]byte("aabbcc abc"))
 	res, pos := algo.ExactMatchNaive(
@@ -87,7 +208,7 @@ func TestExact(t *testing.T) {
 }
 
 func TestEqual(t *testing.T) {
-	pattern := buildPattern(true, algo.FuzzyMatchV2, true, CaseSmart, false, true, false, true, []Range{}, Delimiter{}, []rune("^AbC$"))
+	pattern := buildPattern(true, algo.FuzzyMatchV2, true, false, CaseSmart, false, true, false, true, []Range{}, Delimiter{}, []rune("^AbC$"))
 
 	match := func(str string, sidxExpected int, eidxExpected int) {
 		chars := util.ToChars([]byte(str))
@@ -108,12 +229,12 @@ func TestEqual(t *testing.T) {
 }
 
 func TestCaseSensitivity(t *testing.T) {
-	pat1 := buildPattern(true, algo.FuzzyMatchV2, false, CaseSmart, false, true, false, true, []Range{}, Delimiter{}, []rune("abc"))
-	pat2 := buildPattern(true, algo.FuzzyMatchV2, false, CaseSmart, false, true, false, true, []Range{}, Delimiter{}, []rune("Abc"))
-	pat3 := buildPattern(true, algo.FuzzyMatchV2, false, CaseIgnore, false, true, false, true, []Range{}, Delimiter{}, []rune("abc"))
-	pat4 := buildPattern(true, algo.FuzzyMatchV2, false, CaseIgnore, false, true, false, true, []Range{}, Delimiter{}, []rune("Abc"))
-	pat5 := buildPattern(true, algo.FuzzyMatchV2, false, CaseRespect, false, true, false, true, []Range{}, Delimiter{}, []rune("abc"))
-	pat6 := buildPattern(true, algo.FuzzyMatchV2, false, CaseRespect, false, true, false, true, []Range{}, Delimiter{}, []rune("Abc"))
+	pat1 := buildPattern(true, algo.FuzzyMatchV2, false, false, CaseSmart, false, true, false, true, []Range{}, Delimiter{}, []rune("abc"))
+	pat2 := buildPattern(true, algo.FuzzyMatchV2, false, false, CaseSmart, false, true, false, true, []Range{}, Delimiter{}, []rune("Abc"))
+	pat3 := buildPattern(true, algo.FuzzyMatchV2, false, false, CaseIgnore, false, true, false, true, []Range{}, Delimiter{}, []rune("abc"))
+	pat4 := buildPattern(true, algo.FuzzyMatchV2, false, false, CaseIgnore, false, true, false, true, []Range{}, Delimiter{}, []rune("Abc"))
+	pat5 := buildPattern(true, algo.FuzzyMatchV2, false, false, CaseRespect, false, true, false, true, []Range{}, Delimiter{}, []rune("abc"))
+	pat6 := buildPattern(true, algo.FuzzyMatchV2, false, false, CaseRespect, false, true, false, true, []Range{}, Delimiter{}, []rune("Abc"))
 
 	if string(pat1.text) != "abc" || pat1.caseSensitive != false ||
 		string(pat2.text) != "Abc" || pat2.caseSensitive != true ||
@@ -126,7 +247,7 @@ func TestCaseSensitivity(t *testing.T) {
 }
 
 func TestOrigTextAndTransformed(t *testing.T) {
-	pattern := buildPattern(true, algo.FuzzyMatchV2, true, CaseSmart, false, true, false, true, []Range{}, Delimiter{}, []rune("jg"))
+	pattern := buildPattern(true, algo.FuzzyMatchV2, true, false, CaseSmart, false, true, false, true, []Range{}, Delimiter{}, []rune("jg"))
 	tokens := Tokenize("junegunn", Delimiter{})
 	trans := Transform(tokens, []Range{{1, 1}})
 
@@ -160,7 +281,7 @@ func TestOrigTextAndTransformed(t *testing.T) {
 
 func TestCacheKey(t *testing.T) {
 	test := func(extended bool, patStr string, expected string, cacheable bool) {
-		pat := buildPattern(true, algo.FuzzyMatchV2, extended, CaseSmart, false, true, false, true, []Range{}, Delimiter{}, []rune(patStr))
+		pat := buildPattern(true, algo.FuzzyMatchV2, extended, false, CaseSmart, false, true, false, true, []Range{}, Delimiter{}, []rune(patStr))
 		if pat.CacheKey() != expected {
 			t.Errorf("Expected: %s, actual: %s", expected, pat.CacheKey())
 		}
@@ -182,7 +303,7 @@ func TestCacheKey(t *testing.T) {
 
 func TestCacheable(t *testing.T) {
 	test := func(fuzzy bool, str string, expected string, cacheable bool) {
-		pat := buildPattern(fuzzy, algo.FuzzyMatchV2, true, CaseSmart, true, true, false, true, []Range{}, Delimiter{}, []rune(str))
+		pat := buildPattern(fuzzy, algo.FuzzyMatchV2, true, false, CaseSmart, true, true, false, true, []Range{}, Delimiter{}, []rune(str))
 		if pat.CacheKey() != expected {
 			t.Errorf("Expected: %s, actual: %s", expected, pat.CacheKey())
 		}
@@ -228,7 +349,7 @@ func buildChunks(numChunks int) []*Chunk {
 
 func buildPatternWith(cache *ChunkCache, runes []rune) *Pattern {
 	return BuildPattern(cache, make(map[string]*Pattern),
-		true, algo.FuzzyMatchV2, true, CaseSmart, false, true,
+		true, algo.FuzzyMatchV2, true, false, CaseSmart, false, true,
 		false, true, []Range{}, Delimiter{}, revision{}, runes, nil, 0)
 }
 

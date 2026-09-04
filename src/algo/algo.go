@@ -81,7 +81,9 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -1338,4 +1340,87 @@ func EqualMatch(caseSensitive bool, normalize bool, forward bool, text *util.Cha
 			(bonusFirstCharMultiplier-1)*int(bonusBoundaryWhite)}, nil
 	}
 	return Result{-1, -1, 0}, nil
+}
+
+// regexCache memoizes compiled regular expressions. A term is matched against
+// every item, and regexp.Compile is relatively expensive, so we compile each
+// distinct expression only once. Compilation failures are cached as well, as
+// an invalid pattern (e.g. an unclosed bracket while typing) is retried for
+// every item.
+var regexCache sync.Map // map[string]*regexp.Regexp
+
+func compileRegex(caseSensitive bool, pattern []rune) *regexp.Regexp {
+	var key string
+	if caseSensitive {
+		key = "s:" + string(pattern)
+	} else {
+		key = "i:" + string(pattern)
+	}
+	if re, ok := regexCache.Load(key); ok {
+		return re.(*regexp.Regexp)
+	}
+	expr := string(pattern)
+	// The pattern is not pre-lowercased (unlike the other algorithms), so
+	// that regex-specific constructs such as \D, \S, \W, \B, and [A-Z] are
+	// preserved; case-insensitivity is handled by the engine.
+	if !caseSensitive {
+		expr = "(?i)" + expr
+	}
+	re, err := regexp.Compile(expr)
+	if err != nil {
+		regexCache.Store(key, (*regexp.Regexp)(nil))
+		return nil
+	}
+	regexCache.Store(key, re)
+	return re
+}
+
+// RegexMatch matches the pattern as a regular expression using Go's RE2
+// engine. It returns the leftmost match; the whole matched span is highlighted
+// (pos is nil, and the extended matcher fills the span with positions).
+// An expression that fails to compile never matches.
+func RegexMatch(caseSensitive bool, normalize bool, forward bool, input *util.Chars, pattern []rune, withPos bool, slab *util.Slab) (Result, *[]int) {
+	if len(pattern) == 0 {
+		return Result{0, 0, 0}, nil
+	}
+	re := compileRegex(caseSensitive, pattern)
+	if re == nil {
+		return Result{-1, -1, 0}, nil
+	}
+
+	var s string
+	if normalize {
+		// Normalization is a rune-to-rune mapping, so offsets are preserved.
+		s = string(NormalizeRunes(input.ToRunes()))
+	} else {
+		s = input.ToString()
+	}
+	loc := re.FindStringIndex(s)
+	if loc == nil {
+		return Result{-1, -1, 0}, nil
+	}
+
+	sidx, eidx := loc[0], loc[1]
+	if !input.IsBytes() || normalize {
+		// regexp reports byte offsets, but the Chars index space is runes
+		// when the item contains non-ASCII characters.
+		sidx = utf8.RuneCountInString(s[:loc[0]])
+		eidx = sidx + utf8.RuneCountInString(s[loc[0]:loc[1]])
+	}
+
+	// Fuzzy scoring does not apply; give a deterministic score that prefers
+	// matches starting at word boundaries, and let tiebreaks decide the rest.
+	var bonus int16
+	if sidx == 0 || sidx >= input.Length() {
+		bonus = bonusBoundaryWhite
+	} else {
+		bonus = bonusAt(input, sidx)
+	}
+	score := scoreMatch + int(bonus)*bonusFirstCharMultiplier
+
+	if !forward {
+		lenRunes := input.Length()
+		sidx, eidx = lenRunes-eidx, lenRunes-sidx
+	}
+	return Result{sidx, eidx, score}, nil
 }

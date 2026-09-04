@@ -423,6 +423,25 @@ or `py`.
 ^core go$ | rb$ | py$
 ```
 
+Start fzf with `--regex` to match each term as a regular expression using
+Go's [RE2 syntax](https://github.com/google/re2/wiki/Syntax) (linear-time
+matching, no lookaround or backreferences), so you no longer need to pipe the
+input through an external filter such as `grep`. The extended-search
+combinators still apply: spaces delimit AND terms, a standalone `|` term is
+OR, and a leading `!` negates the term; an unspaced `|` inside a term is
+regex alternation.
+
+```sh
+# Entries that start with "core" and end with "go", "rb", or "py"
+fzf --regex --query '^core .*(go|rb|py)$'
+
+# Non-interactive filtering, replacing "grep -E"
+seq 100 | fzf --regex --filter '^(1|5)\d$'
+
+# Negation still works
+ps -ef | fzf --regex --filter 'python !grep'
+```
+
 ### Environment variables
 
 - `FZF_DEFAULT_COMMAND`

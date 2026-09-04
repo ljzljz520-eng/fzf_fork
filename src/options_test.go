@@ -434,6 +434,18 @@ func TestToggle(t *testing.T) {
 	}
 }
 
+func TestRegexOption(t *testing.T) {
+	if optsFor().Regex {
+		t.Error("regex mode should be disabled by default")
+	}
+	if !optsFor("--regex").Regex {
+		t.Error("--regex should enable regex mode")
+	}
+	if optsFor("--regex", "--no-regex").Regex {
+		t.Error("--no-regex should disable regex mode")
+	}
+}
+
 func TestPreviewOpts(t *testing.T) {
 	opts := optsFor()
 	if !(opts.Preview.command == "" &&

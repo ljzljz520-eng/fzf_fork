@@ -27,6 +27,7 @@ const (
 	termPrefix
 	termSuffix
 	termEqual
+	termRegex
 )
 
 type term struct {
@@ -49,6 +50,7 @@ type Pattern struct {
 	fuzzy         bool
 	fuzzyAlgo     algo.Algo
 	extended      bool
+	regex         bool
 	caseSensitive bool
 	normalize     bool
 	forward       bool
@@ -61,7 +63,7 @@ type Pattern struct {
 	delimiter     Delimiter
 	nth           []Range
 	revision      revision
-	procFun       [6]algo.Algo
+	procFun       [7]algo.Algo
 	cache         *ChunkCache
 	denylist      map[int32]struct{}
 	startIndex    int32
@@ -76,7 +78,7 @@ func init() {
 }
 
 // BuildPattern builds Pattern object from the given arguments
-func BuildPattern(cache *ChunkCache, patternCache map[string]*Pattern, fuzzy bool, fuzzyAlgo algo.Algo, extended bool, caseMode Case, normalize bool, forward bool,
+func BuildPattern(cache *ChunkCache, patternCache map[string]*Pattern, fuzzy bool, fuzzyAlgo algo.Algo, extended bool, regex bool, caseMode Case, normalize bool, forward bool,
 	withPos bool, cacheable bool, nth []Range, delimiter Delimiter, revision revision, runes []rune, denylist map[int32]struct{}, startIndex int32) *Pattern {
 
 	var asString string
@@ -101,7 +103,7 @@ func BuildPattern(cache *ChunkCache, patternCache map[string]*Pattern, fuzzy boo
 	termSets := []termSet{}
 
 	if extended {
-		termSets = parseTerms(fuzzy, caseMode, normalize, asString)
+		termSets = parseTerms(fuzzy, regex, caseMode, normalize, asString)
 		// We should not sort the result if there are only inverse search terms
 		sortable = false
 	Loop:
@@ -127,7 +129,10 @@ func BuildPattern(cache *ChunkCache, patternCache map[string]*Pattern, fuzzy boo
 			lowerString == string(algo.NormalizeRunes([]rune(lowerString)))
 		caseSensitive = caseMode == CaseRespect ||
 			caseMode == CaseSmart && lowerString != asString
-		if !caseSensitive {
+		// In regex mode the pattern is passed to the engine verbatim (with
+		// (?i) when case-insensitive); lowercasing it would break regex
+		// constructs such as \D, \S, \W, \B, and [A-Z].
+		if !caseSensitive && !regex {
 			asString = lowerString
 		}
 	}
@@ -136,6 +141,7 @@ func BuildPattern(cache *ChunkCache, patternCache map[string]*Pattern, fuzzy boo
 		fuzzy:         fuzzy,
 		fuzzyAlgo:     fuzzyAlgo,
 		extended:      extended,
+		regex:         regex,
 		caseSensitive: caseSensitive,
 		normalize:     normalize,
 		forward:       forward,
@@ -160,12 +166,13 @@ func BuildPattern(cache *ChunkCache, patternCache map[string]*Pattern, fuzzy boo
 	ptr.procFun[termExactBoundary] = algo.ExactMatchBoundary
 	ptr.procFun[termPrefix] = algo.PrefixMatch
 	ptr.procFun[termSuffix] = algo.SuffixMatch
+	ptr.procFun[termRegex] = algo.RegexMatch
 
 	patternCache[asString] = ptr
 	return ptr
 }
 
-func parseTerms(fuzzy bool, caseMode Case, normalize bool, str string) []termSet {
+func parseTerms(fuzzy bool, regex bool, caseMode Case, normalize bool, str string) []termSet {
 	str = strings.ReplaceAll(str, "\\ ", "\t")
 	tokens := _splitRegex.Split(str, -1)
 	sets := []termSet{}
@@ -179,11 +186,20 @@ func parseTerms(fuzzy bool, caseMode Case, normalize bool, str string) []termSet
 			caseMode == CaseSmart && text != lowerText
 		normalizeTerm := normalize &&
 			lowerText == string(algo.NormalizeRunes([]rune(lowerText)))
-		if !caseSensitive {
-			text = lowerText
-		}
-		if !fuzzy {
-			typ = termExact
+		if regex {
+			// The term is a regular expression. It is passed to the RE2
+			// engine verbatim (case-insensitivity is handled via (?i)), so
+			// regex constructs such as \D, \S, and [A-Z] are not altered.
+			// fzf's ', ^, and $ term markers are not interpreted either;
+			// ^ and $ retain their regular-expression meanings.
+			typ = termRegex
+		} else {
+			if !caseSensitive {
+				text = lowerText
+			}
+			if !fuzzy {
+				typ = termExact
+			}
 		}
 
 		if len(set) > 0 && !afterBar && text == "|" {
@@ -195,33 +211,37 @@ func parseTerms(fuzzy bool, caseMode Case, normalize bool, str string) []termSet
 
 		if strings.HasPrefix(text, "!") {
 			inv = true
-			typ = termExact
-			text = text[1:]
-		}
-
-		if text != "$" && strings.HasSuffix(text, "$") {
-			typ = termSuffix
-			text = text[:len(text)-1]
-		}
-
-		if len(text) > 2 && strings.HasPrefix(text, "'") && strings.HasSuffix(text, "'") {
-			typ = termExactBoundary
-			text = text[1 : len(text)-1]
-		} else if strings.HasPrefix(text, "'") {
-			// Flip exactness
-			if fuzzy && !inv {
+			if !regex {
 				typ = termExact
-			} else {
-				typ = termFuzzy
 			}
 			text = text[1:]
-		} else if strings.HasPrefix(text, "^") {
-			if typ == termSuffix {
-				typ = termEqual
-			} else {
-				typ = termPrefix
+		}
+
+		if !regex {
+			if text != "$" && strings.HasSuffix(text, "$") {
+				typ = termSuffix
+				text = text[:len(text)-1]
 			}
-			text = text[1:]
+
+			if len(text) > 2 && strings.HasPrefix(text, "'") && strings.HasSuffix(text, "'") {
+				typ = termExactBoundary
+				text = text[1 : len(text)-1]
+			} else if strings.HasPrefix(text, "'") {
+				// Flip exactness
+				if fuzzy && !inv {
+					typ = termExact
+				} else {
+					typ = termFuzzy
+				}
+				text = text[1:]
+			} else if strings.HasPrefix(text, "^") {
+				if typ == termSuffix {
+					typ = termEqual
+				} else {
+					typ = termPrefix
+				}
+				text = text[1:]
+			}
 		}
 
 		if len(text) > 0 {
@@ -406,6 +426,9 @@ func (p *Pattern) basicMatch(item *Item, withPos bool, slab *util.Slab) (Offset,
 		input = []Token{{text: &item.text, prefixLength: 0}}
 	} else {
 		input = p.transformInput(item)
+	}
+	if p.regex {
+		return p.iter(algo.RegexMatch, input, p.caseSensitive, p.normalize, p.forward, p.text, withPos, slab)
 	}
 	if p.fuzzy {
 		return p.iter(p.fuzzyAlgo, input, p.caseSensitive, p.normalize, p.forward, p.text, withPos, slab)

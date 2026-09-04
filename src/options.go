@@ -34,6 +34,7 @@ Usage: fzf [options]
   SEARCH
     -e, --exact              Enable exact-match
     +x, --no-extended        Disable extended-search mode
+        --regex              Treat search terms as regular expressions (RE2)
     -i, --ignore-case        Case-insensitive match
     +i, --no-ignore-case     Case-sensitive match
         --smart-case         Smart-case match (default)
@@ -592,6 +593,7 @@ type Options struct {
 	FuzzyAlgo         algo.Algo
 	Scheme            string
 	Extended          bool
+	Regex             bool
 	Phony             bool
 	Inputless         bool
 	Case              Case
@@ -2719,6 +2721,10 @@ func parseOptions(index *int, opts *Options, allArgs []string) error {
 			opts.Extended = true
 		case "+x", "--no-extended":
 			opts.Extended = false
+		case "--regex":
+			opts.Regex = true
+		case "--no-regex":
+			opts.Regex = false
 		case "+e", "--no-exact":
 			opts.Fuzzy = true
 		case "-q", "--query":
